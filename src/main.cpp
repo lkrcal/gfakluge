@@ -87,6 +87,7 @@ void convert_help(char** argv){
         << "Options: " << endl
         << "  -S / --spec <SPEC> [one of 0.1, 1.0, 2.0]   Convert the input GFA file to specification [0.1, 1.0, or 2.0]." << endl
         << "                                NB: not all GFA specs are backward/forward compatible, so a subset of the GFA may be used." << endl
+        << "  -R / --reds    Convert the input GFA file to Recursive Elastic Degenerate String." << endl
         << "  -w / --walks   Output paths as walks, but maintain version (NOT SPEC COMPLIANT)." << endl
         << "  -p / --paths   Output walks as paths, but maintain version." << endl
         << "  -b / --block-order   Output GFA in block order [HSLP / HSLW | HSEFGUO]." << endl
@@ -546,7 +547,8 @@ int diff_main(int argc, char** argv){
 int convert_main(int argc, char** argv){
     string gfa_file = "";
     bool block_order = false;
-    double spec_version = 2.0;
+    double spec_version = -1.0;
+    bool reds = false;
     bool use_paths = true;
     bool make_fasta = false;
 
@@ -566,6 +568,7 @@ int convert_main(int argc, char** argv){
             {"paths", no_argument, 0, 'p'},
             {"walks", no_argument, 0, 'w'},
             {"spec", required_argument, 0, 'S'},
+            {"reds", no_argument, 0, 'R'},
             {"version", no_argument, 0, 'v'},
             {"fasta", no_argument, 0, 'f'},
             {0,0,0,0}
@@ -591,6 +594,9 @@ int convert_main(int argc, char** argv){
                 break;
             case 'S':
                 spec_version = stod(optarg);
+                break;
+            case 'R':
+                reds = true;
                 break;
             case 'w':
                 use_paths = false;
@@ -620,30 +626,32 @@ int convert_main(int argc, char** argv){
         exit(0);
     }
 
-    if (spec_version == 0.1){
-        gg.set_version(0.1);
-    }
-    else if (spec_version == 1.0){
-        gg.set_version(1.0);
-    }
-    else if (spec_version == 2.0){
-        gg.set_version(2.0);
-    }
-    else if (spec_version != 0.0){
-        cerr << "Invalid specification number: " << spec_version << endl
-        << "Please provide one of [0.1, 1.0, 2.0]." << endl;
+    if (reds && spec_version != -1.0) {
+        cerr << "Cannot use --reds and --spec at the same time!" << endl;
         exit(1);
     }
+    if (reds) {
+        cout << gg.to_reds_string();
+    } else {
+        if (spec_version == 0.1) {
+            gg.set_version(0.1);
+        } else if (spec_version == 1.0) {
+            gg.set_version(1.0);
+        } else if (spec_version == 2.0) {
+            gg.set_version(2.0);
+        } else if (spec_version != 0.0) {
+            cerr << "Invalid specification number: " << spec_version << endl
+                 << "Please provide one of [0.1, 1.0, 2.0]." << endl;
+            exit(1);
+        }
 
-    
-
-    if (block_order){
-        cout << gg.block_order_string();
+        if (block_order){
+            cout << gg.block_order_string();
+        }
+        else{
+            cout << gg.to_string();
+        }
     }
-    else{
-        cout << gg.to_string();
-    }
-
 	return 0;
 }
 

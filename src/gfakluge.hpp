@@ -1,6 +1,7 @@
 #ifndef GFAK_HPP
 #define GFAK_HPP
 
+#include <set>
 #include <string>
 #include <sstream>
 #include <istream>
@@ -20,6 +21,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cassert>
+#include <iomanip>
+#include <iterator>
 
 
 #include "tinyFA.hpp"
@@ -253,6 +256,7 @@ namespace gfak{
         std::string name = "*";
         uint64_t length = UINT64_MAX;
         std::vector<opt_elem> opt_fields;
+        uint64_t path_id = 0;
         std::string to_string_2() const{
             std::ostringstream st;
 
@@ -383,6 +387,7 @@ namespace gfak{
         std::uint64_t sink_end = 0;
         std::string alignment;
         std::map<std::string, opt_elem> tags;
+        int visited = 0;
         int determine_type(){
             if (type == 1 || type == 2){
                 return type;
@@ -679,6 +684,7 @@ namespace gfak{
             /** GFA 2.0 containers **/
             std::map<std::string, std::vector<fragment_elem> > seq_to_fragments;
             std::map<std::string, std::vector<edge_elem> > seq_to_edges;
+            std::map<std::string, std::vector<edge_elem> > seq_to_in_edges;
             std::map<std::string, std::vector<gap_elem> > seq_to_gaps;
             std::map<std::string, group_elem> groups;
 
@@ -1172,6 +1178,7 @@ namespace gfak{
             }
             inline void add_edge(const std::string& seqname, const edge_elem& e){
                 seq_to_edges[seqname].push_back(e);
+                seq_to_in_edges[e.sink_name].push_back(e);
             }
             inline void add_edge(const sequence_elem& s, const edge_elem& e){
                 add_edge(s.name, e);
@@ -1466,6 +1473,7 @@ namespace gfak{
                             e.alignment = l.cigar;
                             e.tags = l.opt_fields;
                             seq_to_edges[e.source_name].push_back(e);
+                            seq_to_in_edges[e.sink_name].push_back(e);
                         }
                         // Make an edge for each containment
                         for (auto c : seq_to_contained[s.first]){
@@ -1497,6 +1505,7 @@ namespace gfak{
 
                             e.tags = c.opt_fields;
                             seq_to_edges[e.source_name].push_back(e);
+                            seq_to_in_edges[e.sink_name].push_back(e);
                         }
                     }
                     // Paths -> ordered groups
@@ -2690,6 +2699,147 @@ namespace gfak{
 
                 return true;
 
+            }
+
+
+
+            struct path_t {
+                uint64_t id;
+                std::vector<std::string> seqs;
+                bool operator==(const path_t & other) const
+                {
+                    return id == other.id;
+                }
+            };
+
+
+            /**
+             * hashes vectors based on the first element
+             */
+            struct path_hash {
+                size_t operator()(const path_t& p) const {
+                    std::hash<uint64_t> hasher;
+                    return hasher(p.id);
+                }
+            };
+
+            inline void print_paths(const std::unordered_set<path_t,path_hash> &paths){
+                std::cout << "Total of " << paths.size() << " paths:" << std::endl;
+                for (const path_t &path : paths) {
+                    std::cout << "  " << std::setfill('0') << std::setw(7) << path.id << ": ";
+                    std::copy(path.seqs.begin(), path.seqs.end() - 1, std::ostream_iterator<std::string>(std::cout, " -> "));
+                    std::cout << path.seqs.back() << std::endl;
+                }
+            }
+
+            inline std::unordered_set<path_t,path_hash> expand_paths(const std::unordered_set<path_t,path_hash> &paths){
+                std::set<std::string> next_nodes_candidates;
+                // Mark all edges from the current frontier to be visited
+                for (auto &path : paths) {
+                    std::vector<edge_elem> edges_from_last_node = seq_to_edges[path.seqs.back()];
+                    for (auto &edge : edges_from_last_node) {
+                        next_nodes_candidates.insert(edge.sink_name);
+                        edge.visited = 1;
+                    }
+                }
+                // Mark all nodes that can be expanded - nodes that cannot be expanded have at least
+                // two edges of the same properties, i.e. generating the same sequence, but at least
+                // one of these edges is not going to be visited now
+                std::set<std::string> next_nodes_cannot_visit;
+                for (const std::string &node_name : next_nodes_candidates){
+                    for (const auto &in_edge : seq_to_in_edges[node_name]){
+                        if (in_edge.visited) {
+                            continue;
+                        }
+                        for (const auto &in_edge_cmp : seq_to_in_edges[node_name]){
+                            if (in_edge_cmp.visited || in_edge.id == in_edge_cmp.id){
+                                continue;
+                            }
+                            if (in_edge.sink_orientation_forward == in_edge_cmp.sink_orientation_forward &&
+                                in_edge.source_orientation_forward == in_edge_cmp.source_orientation_forward &&
+                                in_edge.sink_begin == in_edge_cmp.sink_begin &&
+                                in_edge.sink_end == in_edge_cmp.sink_end){
+                                // Found two edges that would generate the same sequence string
+                                std::cout << "  Node " << node_name << " has at least two unvisited edges: "
+                                    << in_edge.id << " and " << in_edge_cmp.id << std::endl;
+                                next_nodes_cannot_visit.insert(node_name);
+                            }
+                        }
+                    }
+                }
+                // Remove nodes that cannot be visited from the nodes for next iteration
+                std::set<std::string> next_nodes;
+                std::set_difference(next_nodes_candidates.begin(), next_nodes_candidates.end(),
+                                    next_nodes_cannot_visit.begin(),next_nodes_cannot_visit.end(),
+                                    std::inserter(next_nodes, next_nodes.end()));
+
+                std::cout << "Expanded to nodes: ";
+                for (const std::string &node : next_nodes){
+                     std::cout << node <<  " ";
+                }
+                std::cout << std::endl;
+
+                // Add to paths all edges that don't go to excluded nodes
+                std::unordered_set<path_t,path_hash> next_paths;
+                uint64_t path_id = 0;
+                for (auto &path : paths) {
+                    std::cout << "X " << std::setfill('0') << std::setw(7) << path.id << ": ";
+                    std::copy(path.seqs.begin(), path.seqs.end() - 1, std::ostream_iterator<std::string>(std::cout, " -> "));
+                    std::cout << path.seqs.back() << std::endl;
+
+                    std::vector<edge_elem> edges_from_last_node = seq_to_edges[path.seqs.back()];
+                    for (auto &edge : edges_from_last_node) {
+                        if (edge.visited > 3) {
+                            std::cout << "Edge " << edge.id << " has been visited over 3 times - skipped!" << std::endl;
+                            continue;
+                        }
+                        if (next_nodes.find(edge.sink_name) != next_nodes.end()){
+                            path_t new_path{path_id++, path.seqs};
+                            new_path.seqs.push_back(edge.sink_name);
+                            next_paths.insert(new_path);
+                            edge.visited++;
+
+                            std::cout << edge.visited << " " << std::setfill('0') << std::setw(7) << new_path.id << ": ";
+                            std::copy(new_path.seqs.begin(), new_path.seqs.end() - 1, std::ostream_iterator<std::string>(std::cout, " -> "));
+                            std::cout << new_path.seqs.back() << std::endl;
+                        }
+                    }
+                }
+                return next_paths;
+            }
+
+            inline void _to_reds_string_rec(const std::unordered_set<path_t,path_hash>& active_paths, const int depth = 0){
+                if (active_paths.empty()){
+                    std::cout << "E" << std::endl;
+                    return;
+                }
+                std::cout << "------------------------" << std::endl;
+                std::cout << "DEPTH: " << depth << std::endl;
+                if (depth >= 5) {
+                    return;
+                }
+                auto new_paths = expand_paths(active_paths);
+                _to_reds_string_rec(new_paths, depth+1);
+            }
+
+            inline std::string to_reds_string(){
+                // Identifying starting sequences - i.e. sequences without any incoming edges
+                std::unordered_set<path_t,path_hash> active_paths;
+                uint64_t path_id = 1;
+                for (auto &ns : name_to_seq) {
+                    const std::string seq_name = ns.first;
+                    const auto &edges = seq_to_in_edges[seq_name];
+                    if (edges.empty()){
+                        active_paths.insert(path_t{path_id, std::vector<std::string>({seq_name})});
+                        ns.second.path_id = path_id;
+                        path_id++;
+                    }
+                }
+                std::cout << "Identified " << active_paths.size() << " starting edges out of total " << seq_to_edges.size() << " total edges." << std::endl;
+
+                _to_reds_string_rec(active_paths);
+
+                return std::string("This is REDS");
             }
         };
 
